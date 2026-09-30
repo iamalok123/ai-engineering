@@ -1,0 +1,55 @@
+# ==============================================================================
+# AI Engineering Repository .gitignore
+# ==============================================================================
+
+# Environment variables & secrets (CRITICAL)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+credentials.json
+client_secret*.json
+*.token
+*.sqlite
+*.db
+
+
+# Python virtual environments
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+
+# Python cache & build artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+**/*.egg-info/
+build/
+dist/
+wheels/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+**/.vscode/
+**/.idea/
+*.swp
+*.swo
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
