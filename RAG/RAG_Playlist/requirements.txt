@@ -6,3 +6,5 @@ python-dotenv
 chromadb
 langchain-core
 langchain-chroma
+langchain-experimental
+fastembed

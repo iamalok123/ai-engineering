@@ -1,8 +1,9 @@
 import os
+import time
 import sys
 from langchain_community.document_loaders import TextLoader, DirectoryLoader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
 
@@ -50,56 +51,63 @@ def load_documents(docs_path="docs"):
     return documents
 
 
+def is_reference_chunk(text):
+    """Filter out Wikipedia citation lists that pollute vector search rankings"""
+    return text.count("http") >= 2 or "Retrieved" in text or "Archived" in text
 
-def split_documents(documents, chunk_size=1000, chunk_overlap=0):
-    """Split documents into smaller chunks with overlap"""
+
+def split_documents(documents, chunk_size=1200, chunk_overlap=150):
+    """Split documents using RecursiveCharacterTextSplitter and filter out reference noise"""
     print("Splitting documents into chunks...")
     
-    text_splitter = CharacterTextSplitter(
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size, 
         chunk_overlap=chunk_overlap
     )
     
-    chunks = text_splitter.split_documents(documents)
+    raw_chunks = text_splitter.split_documents(documents)
+    print(f"Total raw chunks: {len(raw_chunks)}")
+
+    # Drop citation and reference chunks
+    chunks = [c for c in raw_chunks if not is_reference_chunk(c.page_content)]
+    print(f"Total cleaned chunks after filtering references: {len(chunks)}")
     
     if chunks:
-        for i, chunk in enumerate(chunks[:5]):
-            print(f"\n--- Chunk {i+1} ---")
+        for i, chunk in enumerate(chunks[:3]):
+            print(f"\n--- Sample Chunk {i+1} ---")
             print(f"Source: {chunk.metadata['source']}")
             print(f"Length: {len(chunk.page_content)} characters")
-            print(f"Content:")
-            print(chunk.page_content)
+            print(f"Content:\n{chunk.page_content[:150]}...")
             print("-" * 50)
         
-        if len(chunks) > 5:
-            print(f"\n... and {len(chunks) - 5} more chunks")
+        if len(chunks) > 3:
+            print(f"\n... and {len(chunks) - 3} more chunks ready for ingestion")
     
     return chunks
 
 
 
-def create_vector_store(chunks, persist_directory="db/chroma_db"):
-    """Create and persist ChromaDB vector store using Google Gemini embeddings"""
-    print("Creating embeddings and storing in ChromaDB...")
-        
-    embedding_model = GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    )
+def create_vector_store(chunks, persist_directory="db/chroma_db", batch_size=100):
+    """Embed chunks using FastEmbed (HuggingFace ONNX) ultra-fast without rate limits"""
+    print(f"Embedding {len(chunks)} chunks using FastEmbed (BAAI/bge-small-en-v1.5)...")
+    t0 = time.time()
     
-    # Create ChromaDB vector store
-    print("--- Creating vector store ---")
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embedding_model,
-        persist_directory=persist_directory, 
+    embedding_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+
+    vectorstore = Chroma(
+        persist_directory=persist_directory,
+        embedding_function=embedding_model,
         collection_metadata={"hnsw:space": "cosine"}
     )
-    print("--- Finished creating vector store ---")
-    
-    print(f"Vector store created and saved to {persist_directory}")
-    return vectorstore
 
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        vectorstore.add_documents(batch)
+        print(f"  Embedded {min(i + batch_size, len(chunks))}/{len(chunks)} chunks...")
+
+    elapsed = time.time() - t0
+    print(f"⚡ Ingestion completed in {elapsed:.2f} seconds! ({len(chunks)/elapsed:.1f} chunks/sec)")
+    return vectorstore
 
 
 
@@ -113,23 +121,21 @@ def main():
     docs_path = "docs"
     persistent_directory = "db/chroma_db"
     
-    # Check if vector store already exists
+    # Check if vector store already exists and contains documents
     if os.path.exists(persistent_directory):
-        print("✅ Vector store already exists. No need to re-process documents.")
-        
-        embedding_model = GoogleGenerativeAIEmbeddings(
-            model="models/gemini-embedding-001",
-            google_api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        )
+        embedding_model = FastEmbedEmbeddings(model_name="BAAI/bge-small-en-v1.5")
         vectorstore = Chroma(
             persist_directory=persistent_directory,
             embedding_function=embedding_model, 
             collection_metadata={"hnsw:space": "cosine"}
         )
-        print(f"Loaded existing vector store with {vectorstore._collection.count()} documents")
-        return vectorstore
-    
-    print("Persistent directory does not exist. Initializing vector store...\n")
+        doc_count = vectorstore._collection.count()
+        if doc_count > 0:
+            print(f"✅ Vector store already exists with {doc_count} documents. No need to re-process documents.")
+            return vectorstore
+        print("⚠️ Persistent directory exists but contains 0 documents. Populating vector store...\n")
+    else:
+        print("Persistent directory does not exist. Initializing vector store...\n")
 
 
 
@@ -140,8 +146,7 @@ def main():
     chunks = split_documents(documents)
 
     # Step 3: Create vector store
-    # Note: Using first 40 chunks to stay under Gemini Free Tier quota (100 embeddings/min)
-    vectorstore = create_vector_store(chunks[:40], persistent_directory)
+    vectorstore = create_vector_store(chunks, persistent_directory)
 
 
     print("\n✅ Ingestion complete! Your documents are now ready for RAG queries.")
